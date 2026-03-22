@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -691,7 +692,7 @@ func getLastOutput(state *State) string {
 			lastText = entry.Message.Content[0].Text
 		}
 	}
-	return lastText
+	return strings.TrimSpace(lastText)
 }
 
 func isoNow() string {
