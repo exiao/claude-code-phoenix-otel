@@ -7,14 +7,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
+
+	collectorpb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // OTLPExporter sends spans to Phoenix via OTLP HTTP/protobuf.
-// For simplicity and zero protobuf dependency, we use OTLP JSON format
-// which Phoenix also supports natively.
 type OTLPExporter struct {
 	endpoint string
 	apiKey   string
@@ -58,26 +61,25 @@ type SpanStatus struct {
 	Message string
 }
 
-// ExportSpans sends a batch of spans to Phoenix via OTLP HTTP JSON.
+// ExportSpans sends a batch of spans to Phoenix via OTLP HTTP/protobuf.
 func (e *OTLPExporter) ExportSpans(spans []OTLPSpan) error {
 	if len(spans) == 0 {
 		return nil
 	}
 
-	payload := e.buildExportPayload(spans)
-
-	jsonData, err := json.Marshal(payload)
+	request := e.buildProtoRequest(spans)
+	data, err := proto.Marshal(request)
 	if err != nil {
-		return fmt.Errorf("marshal OTLP payload: %w", err)
+		return fmt.Errorf("marshal protobuf: %w", err)
 	}
 
 	url := e.endpoint + "/v1/traces"
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(data))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-protobuf")
 	if e.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+e.apiKey)
 	}
@@ -99,83 +101,102 @@ func (e *OTLPExporter) ExportSpans(spans []OTLPSpan) error {
 	return nil
 }
 
-func (e *OTLPExporter) buildExportPayload(spans []OTLPSpan) map[string]interface{} {
-	// Group spans by trace ID
-	traceSpans := make(map[string][]map[string]interface{})
+func (e *OTLPExporter) buildProtoRequest(spans []OTLPSpan) *collectorpb.ExportTraceServiceRequest {
+	var protoSpans []*tracepb.Span
 	for _, span := range spans {
-		traceKey := hex.EncodeToString(span.TraceID[:])
-		traceSpans[traceKey] = append(traceSpans[traceKey], e.spanToJSON(span))
+		protoSpans = append(protoSpans, e.spanToProto(span))
 	}
 
-	var scopeSpans []map[string]interface{}
-	for _, spans := range traceSpans {
-		scopeSpans = append(scopeSpans, map[string]interface{}{
-			"scope": map[string]interface{}{
-				"name":    "claude-code-phoenix-otel",
-				"version": "0.1.0",
-			},
-			"spans": spans,
-		})
-	}
-
-	return map[string]interface{}{
-		"resourceSpans": []map[string]interface{}{
+	return &collectorpb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{
 			{
-				"resource": map[string]interface{}{
-					"attributes": []map[string]interface{}{
-						{"key": "service.name", "value": map[string]interface{}{"stringValue": e.service}},
-						{"key": "openinference.project.name", "value": map[string]interface{}{"stringValue": e.project}},
+				Resource: &resourcepb.Resource{
+					Attributes: []*commonpb.KeyValue{
+						stringAttr("service.name", e.service),
+						stringAttr("openinference.project.name", e.project),
 					},
 				},
-				"scopeSpans": scopeSpans,
+				ScopeSpans: []*tracepb.ScopeSpans{
+					{
+						Scope: &commonpb.InstrumentationScope{
+							Name:    "claude-code-phoenix-otel",
+							Version: "0.1.0",
+						},
+						Spans: protoSpans,
+					},
+				},
 			},
 		},
 	}
 }
 
-func (e *OTLPExporter) spanToJSON(span OTLPSpan) map[string]interface{} {
-	result := map[string]interface{}{
-		"traceId":            hex.EncodeToString(span.TraceID[:]),
-		"spanId":             hex.EncodeToString(span.SpanID[:]),
-		"name":               span.Name,
-		"kind":               int(span.Kind),
-		"startTimeUnixNano":  strconv.FormatInt(span.StartTime.UnixNano(), 10),
-		"endTimeUnixNano":    strconv.FormatInt(span.EndTime.UnixNano(), 10),
-		"attributes":         attributesToJSON(span.Attributes),
-		"status":             map[string]interface{}{"code": span.Status.Code, "message": span.Status.Message},
+func (e *OTLPExporter) spanToProto(span OTLPSpan) *tracepb.Span {
+	s := &tracepb.Span{
+		TraceId:                span.TraceID[:],
+		SpanId:                 span.SpanID[:],
+		Name:                   span.Name,
+		Kind:                   tracepb.Span_SpanKind(span.Kind),
+		StartTimeUnixNano:      uint64(span.StartTime.UnixNano()),
+		EndTimeUnixNano:        uint64(span.EndTime.UnixNano()),
+		Attributes:             mapToAttributes(span.Attributes),
+		Status: &tracepb.Status{
+			Code:    tracepb.Status_StatusCode(span.Status.Code),
+			Message: span.Status.Message,
+		},
 	}
 
 	emptyParent := [8]byte{}
 	if span.ParentSpanID != emptyParent {
-		result["parentSpanId"] = hex.EncodeToString(span.ParentSpanID[:])
+		s.ParentSpanId = span.ParentSpanID[:]
 	}
 
+	return s
+}
+
+func mapToAttributes(attrs map[string]interface{}) []*commonpb.KeyValue {
+	var result []*commonpb.KeyValue
+	for key, val := range attrs {
+		result = append(result, toKeyValue(key, val))
+	}
 	return result
 }
 
-func attributesToJSON(attrs map[string]interface{}) []map[string]interface{} {
-	var result []map[string]interface{}
-	for key, val := range attrs {
-		attr := map[string]interface{}{"key": key}
-		switch v := val.(type) {
-		case string:
-			attr["value"] = map[string]interface{}{"stringValue": v}
-		case int:
-			attr["value"] = map[string]interface{}{"intValue": strconv.Itoa(v)}
-		case int64:
-			attr["value"] = map[string]interface{}{"intValue": strconv.FormatInt(v, 10)}
-		case float64:
-			attr["value"] = map[string]interface{}{"doubleValue": v}
-		case bool:
-			attr["value"] = map[string]interface{}{"boolValue": v}
-		default:
-			// JSON-stringify anything else
-			data, _ := json.Marshal(v)
-			attr["value"] = map[string]interface{}{"stringValue": string(data)}
+func toKeyValue(key string, val interface{}) *commonpb.KeyValue {
+	switch v := val.(type) {
+	case string:
+		return stringAttr(key, v)
+	case int:
+		return intAttr(key, int64(v))
+	case int64:
+		return intAttr(key, v)
+	case float64:
+		return &commonpb.KeyValue{
+			Key:   key,
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_DoubleValue{DoubleValue: v}},
 		}
-		result = append(result, attr)
+	case bool:
+		return &commonpb.KeyValue{
+			Key:   key,
+			Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_BoolValue{BoolValue: v}},
+		}
+	default:
+		data, _ := json.Marshal(v)
+		return stringAttr(key, string(data))
 	}
-	return result
+}
+
+func stringAttr(key, val string) *commonpb.KeyValue {
+	return &commonpb.KeyValue{
+		Key:   key,
+		Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: val}},
+	}
+}
+
+func intAttr(key string, val int64) *commonpb.KeyValue {
+	return &commonpb.KeyValue{
+		Key:   key,
+		Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_IntValue{IntValue: val}},
+	}
 }
 
 // Helper to build OpenInference span attributes.
@@ -191,7 +212,6 @@ func openInferenceAttrs(kind string, extra map[string]interface{}) map[string]in
 
 // parseTimestamp parses an ISO 8601 timestamp string.
 func parseTimestamp(ts string) time.Time {
-	// Try common formats
 	for _, layout := range []string{
 		"2006-01-02T15:04:05.000Z",
 		"2006-01-02T15:04:05Z",
@@ -260,4 +280,9 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen]) + "..."
+}
+
+// hexTraceID returns the hex string of a trace ID for debug logging.
+func hexTraceID(id [16]byte) string {
+	return hex.EncodeToString(id[:])
 }

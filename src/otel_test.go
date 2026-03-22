@@ -1,12 +1,14 @@
 package main
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	collectorpb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestNewOTLPExporter(t *testing.T) {
@@ -39,7 +41,7 @@ func TestExportSpansEmpty(t *testing.T) {
 	}
 }
 
-func TestExportSpansPayloadFormat(t *testing.T) {
+func TestExportSpansProtobufFormat(t *testing.T) {
 	var receivedBody []byte
 	var receivedHeaders http.Header
 
@@ -79,43 +81,36 @@ func TestExportSpansPayloadFormat(t *testing.T) {
 		t.Fatalf("ExportSpans: %v", err)
 	}
 
+	// Check content type is protobuf
+	if ct := receivedHeaders.Get("Content-Type"); ct != "application/x-protobuf" {
+		t.Errorf("Content-Type = %q, want application/x-protobuf", ct)
+	}
+
 	// Check auth header
 	if auth := receivedHeaders.Get("Authorization"); auth != "Bearer sk-test-key" {
-		t.Errorf("Authorization = %q, want %q", auth, "Bearer sk-test-key")
+		t.Errorf("Authorization = %q", auth)
 	}
 
-	// Check content type
-	if ct := receivedHeaders.Get("Content-Type"); ct != "application/json" {
-		t.Errorf("Content-Type = %q", ct)
+	// Deserialize protobuf
+	var req collectorpb.ExportTraceServiceRequest
+	if err := proto.Unmarshal(receivedBody, &req); err != nil {
+		t.Fatalf("unmarshal protobuf: %v", err)
 	}
 
-	// Parse payload
-	var payload map[string]interface{}
-	if err := json.Unmarshal(receivedBody, &payload); err != nil {
-		t.Fatalf("parse payload: %v", err)
+	if len(req.ResourceSpans) != 1 {
+		t.Fatalf("got %d resourceSpans, want 1", len(req.ResourceSpans))
 	}
 
-	// Check structure
-	resourceSpans, ok := payload["resourceSpans"].([]interface{})
-	if !ok || len(resourceSpans) == 0 {
-		t.Fatal("missing resourceSpans")
-	}
-
-	rs := resourceSpans[0].(map[string]interface{})
-	resource := rs["resource"].(map[string]interface{})
-	attrs := resource["attributes"].([]interface{})
+	rs := req.ResourceSpans[0]
 
 	// Check resource attributes
 	foundServiceName := false
 	foundProject := false
-	for _, a := range attrs {
-		attr := a.(map[string]interface{})
-		key := attr["key"].(string)
-		val := attr["value"].(map[string]interface{})
-		if key == "service.name" && val["stringValue"] == "claude-code" {
+	for _, attr := range rs.Resource.Attributes {
+		if attr.Key == "service.name" && attr.Value.GetStringValue() == "claude-code" {
 			foundServiceName = true
 		}
-		if key == "openinference.project.name" && val["stringValue"] == "my-project" {
+		if attr.Key == "openinference.project.name" && attr.Value.GetStringValue() == "my-project" {
 			foundProject = true
 		}
 	}
@@ -126,25 +121,57 @@ func TestExportSpansPayloadFormat(t *testing.T) {
 		t.Error("missing openinference.project.name resource attribute")
 	}
 
+	// Check scope
+	if len(rs.ScopeSpans) != 1 {
+		t.Fatalf("got %d scopeSpans, want 1", len(rs.ScopeSpans))
+	}
+	scope := rs.ScopeSpans[0].Scope
+	if scope.Name != "claude-code-phoenix-otel" {
+		t.Errorf("scope name = %q", scope.Name)
+	}
+
 	// Check span
-	scopeSpans := rs["scopeSpans"].([]interface{})
-	ss := scopeSpans[0].(map[string]interface{})
-	spanList := ss["spans"].([]interface{})
-	span := spanList[0].(map[string]interface{})
-
-	if span["name"] != "test-span" {
-		t.Errorf("span name = %q", span["name"])
-	}
-	if span["traceId"] != "0102030405060708090a0b0c0d0e0f10" {
-		t.Errorf("traceId = %q", span["traceId"])
-	}
-	if span["spanId"] != "0102030405060708" {
-		t.Errorf("spanId = %q", span["spanId"])
+	protoSpans := rs.ScopeSpans[0].Spans
+	if len(protoSpans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(protoSpans))
 	}
 
-	// parentSpanId should be absent for root spans
-	if _, hasParent := span["parentSpanId"]; hasParent {
+	span := protoSpans[0]
+	if span.Name != "test-span" {
+		t.Errorf("span name = %q", span.Name)
+	}
+	if len(span.ParentSpanId) != 0 {
 		t.Error("root span should not have parentSpanId")
+	}
+
+	// Check span attributes
+	foundKind := false
+	foundSession := false
+	foundTokens := false
+	for _, attr := range span.Attributes {
+		switch attr.Key {
+		case "openinference.span.kind":
+			if attr.Value.GetStringValue() == "AGENT" {
+				foundKind = true
+			}
+		case "session.id":
+			if attr.Value.GetStringValue() == "sess-123" {
+				foundSession = true
+			}
+		case "llm.token_count.total":
+			if attr.Value.GetIntValue() == 150 {
+				foundTokens = true
+			}
+		}
+	}
+	if !foundKind {
+		t.Error("missing openinference.span.kind attribute")
+	}
+	if !foundSession {
+		t.Error("missing session.id attribute")
+	}
+	if !foundTokens {
+		t.Error("missing llm.token_count.total attribute")
 	}
 }
 
@@ -176,18 +203,19 @@ func TestExportSpansWithParent(t *testing.T) {
 
 	exp.ExportSpans(spans)
 
-	var payload map[string]interface{}
-	json.Unmarshal(receivedBody, &payload)
+	var req collectorpb.ExportTraceServiceRequest
+	proto.Unmarshal(receivedBody, &req)
 
-	rs := payload["resourceSpans"].([]interface{})[0].(map[string]interface{})
-	ss := rs["scopeSpans"].([]interface{})[0].(map[string]interface{})
-	span := ss["spans"].([]interface{})[0].(map[string]interface{})
-
-	if _, hasParent := span["parentSpanId"]; !hasParent {
+	span := req.ResourceSpans[0].ScopeSpans[0].Spans[0]
+	if len(span.ParentSpanId) == 0 {
 		t.Error("child span should have parentSpanId")
 	}
-	if span["parentSpanId"] != "090a0b0c0d0e0f10" {
-		t.Errorf("parentSpanId = %q", span["parentSpanId"])
+	expected := []byte{9, 10, 11, 12, 13, 14, 15, 16}
+	for i, b := range span.ParentSpanId {
+		if b != expected[i] {
+			t.Errorf("parentSpanId[%d] = %d, want %d", i, b, expected[i])
+			break
+		}
 	}
 }
 
@@ -236,53 +264,6 @@ func TestExportSpansServerError(t *testing.T) {
 
 	if err == nil {
 		t.Error("expected error for 500 response")
-	}
-}
-
-func TestAttributesToJSON(t *testing.T) {
-	attrs := map[string]interface{}{
-		"string_key": "hello",
-		"int_key":    42,
-		"bool_key":   true,
-		"float_key":  3.14,
-	}
-
-	result := attributesToJSON(attrs)
-
-	if len(result) != 4 {
-		t.Fatalf("got %d attributes, want 4", len(result))
-	}
-
-	found := make(map[string]bool)
-	for _, attr := range result {
-		key := attr["key"].(string)
-		val := attr["value"].(map[string]interface{})
-		found[key] = true
-
-		switch key {
-		case "string_key":
-			if val["stringValue"] != "hello" {
-				t.Errorf("string_key value = %v", val)
-			}
-		case "int_key":
-			if val["intValue"] != "42" {
-				t.Errorf("int_key value = %v", val)
-			}
-		case "bool_key":
-			if val["boolValue"] != true {
-				t.Errorf("bool_key value = %v", val)
-			}
-		case "float_key":
-			if val["doubleValue"] != 3.14 {
-				t.Errorf("float_key value = %v", val)
-			}
-		}
-	}
-
-	for _, key := range []string{"string_key", "int_key", "bool_key", "float_key"} {
-		if !found[key] {
-			t.Errorf("missing attribute %q", key)
-		}
 	}
 }
 
@@ -335,11 +316,11 @@ func TestSafeStringify(t *testing.T) {
 
 func TestCategorizeError(t *testing.T) {
 	tests := map[string]string{
-		"connection timed out":    "timeout",
-		"permission denied":      "permission_denied",
-		"file not found":         "not_found",
-		"connection refused":     "network_error",
-		"some unknown error":     "tool_error",
+		"connection timed out": "timeout",
+		"permission denied":   "permission_denied",
+		"file not found":      "not_found",
+		"connection refused":  "network_error",
+		"some unknown error":  "tool_error",
 	}
 	for input, want := range tests {
 		got := categorizeError(input)
