@@ -4,6 +4,8 @@ Export [Claude Code](https://docs.anthropic.com/en/docs/claude-code) session tra
 
 Each conversation turn becomes a trace. Tool calls, thinking, and responses become spans. Subagent invocations nest under their parent. Uses [OpenInference](https://github.com/Arize-ai/openinference) semantic conventions for native Phoenix rendering.
 
+![Trace detail in Phoenix](assets/screenshot-trace.png)
+
 ## What Gets Traced
 
 - **LLM interactions** with full input/output content
