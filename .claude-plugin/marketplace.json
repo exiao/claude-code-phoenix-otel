@@ -7,6 +7,7 @@
   "plugins": [
     {
       "name": "phoenix-otel",
+      "version": "0.3.0",
       "source": "./",
       "description": "Export Claude Code session traces to Phoenix (Arize) via OpenTelemetry",
       "author": {
