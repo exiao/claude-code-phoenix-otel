@@ -24,6 +24,17 @@ From within Claude Code:
 
 Then restart Claude Code for hooks to take effect.
 
+### Update
+
+To update to the latest version, run both commands in order:
+
+```
+claude plugins marketplace update phoenix-otel
+claude plugins update phoenix-otel@phoenix-otel
+```
+
+Then restart Claude Code.
+
 ## Configure
 
 **Option 1: Slash command** (recommended, from within Claude Code):
