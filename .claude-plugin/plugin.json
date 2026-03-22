@@ -1,6 +1,6 @@
 {
   "name": "phoenix-otel",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Export Claude Code session traces to Phoenix (Arize) via OpenTelemetry",
   "author": {
     "name": "Eric Xiao",

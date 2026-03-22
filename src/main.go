@@ -100,38 +100,16 @@ func onPrompt() {
 		Transcript: input.TranscriptPath,
 		StartLine:  startLine,
 		LastFlush:  time.Now().Unix(),
+		Prompt:     input.Prompt,
 	}
 	if err := SaveState(state); err != nil {
 		debugLog("save state: %v", err)
 	}
 
 	debugLog("trace=%s rootSpan=%s start=%d", traceID, rootSpanID, startLine)
-
-	// Create root AGENT span
-	now := time.Now()
-	rootSpan := OTLPSpan{
-		TraceID:   traceIDFromUUID(traceID),
-		SpanID:    spanIDFromUUID(rootSpanID),
-		Name:      "claude-code",
-		StartTime: now,
-		EndTime:   now,
-		Kind:      SpanKindServer,
-		Attributes: openInferenceAttrs("AGENT", map[string]interface{}{
-			"input.value":     safeStringify(map[string]string{"prompt": input.Prompt}, maxFieldLen),
-			"input.mime_type": "application/json",
-			"session.id":      input.SessionID,
-			"agent.name":      "claude-code",
-		}),
-		Status: SpanStatus{Code: 0},
-	}
-
-	if config.RootSpanID != "" {
-		rootSpan.ParentSpanID = spanIDFromUUID(config.RootSpanID)
-	}
-
-	if err := exporter.ExportSpans([]OTLPSpan{rootSpan}); err != nil {
-		debugLog("export root span: %v", err)
-	}
+	// Root span is NOT sent here. It's deferred to onStop/onSessionEnd
+	// so it includes output, correct end time, and OK status.
+	// OTLP spans are immutable once received by Phoenix.
 }
 
 func onTool() {
@@ -161,47 +139,11 @@ func onStop() {
 		return
 	}
 
+	// Flush child spans (tool calls, thinking, text)
 	flush(state)
 
-	// Update root span with output and end time
-	output := getLastOutput(state)
-	now := time.Now()
-	startTime := parseTimestamp(state.StartTime)
-
-	rootSpan := OTLPSpan{
-		TraceID:   traceIDFromUUID(state.TraceID),
-		SpanID:    spanIDFromUUID(state.RootSpanID),
-		Name:      "claude-code",
-		StartTime: startTime,
-		EndTime:   now,
-		Kind:      SpanKindServer,
-		Attributes: openInferenceAttrs("AGENT", map[string]interface{}{
-			"output.value":     output,
-			"output.mime_type": "text/plain",
-			"session.id":       input.SessionID,
-			"agent.name":       "claude-code",
-		}),
-		Status: SpanStatus{Code: 1},
-	}
-
-	if config.RootSpanID != "" {
-		rootSpan.ParentSpanID = spanIDFromUUID(config.RootSpanID)
-	}
-
-	// Add slug as trace name
-	allEntries, err := ReadTranscript(state.Transcript, 0)
-	if err == nil {
-		if slug := findSlug(allEntries); slug != "" {
-			rootSpan.Name = slug
-		}
-		if model := FindModel(allEntries); model != "" {
-			rootSpan.Attributes["llm.model_name"] = model
-		}
-	}
-
-	if err := exporter.ExportSpans([]OTLPSpan{rootSpan}); err != nil {
-		debugLog("update root span: %v", err)
-	}
+	// Now send the complete root span with input + output + final status
+	sendRootSpan(state)
 
 	debugLog("done")
 }
@@ -210,25 +152,7 @@ func onSessionEnd() {
 	state, err := LoadState(input.SessionID)
 	if err == nil {
 		flush(state)
-
-		now := time.Now()
-		startTime := parseTimestamp(state.StartTime)
-		rootSpan := OTLPSpan{
-			TraceID:   traceIDFromUUID(state.TraceID),
-			SpanID:    spanIDFromUUID(state.RootSpanID),
-			Name:      "claude-code",
-			StartTime: startTime,
-			EndTime:   now,
-			Kind:      SpanKindServer,
-			Attributes: openInferenceAttrs("AGENT", map[string]interface{}{
-				"session.id": input.SessionID,
-				"agent.name": "claude-code",
-			}),
-			Status: SpanStatus{Code: 1},
-		}
-		if err := exporter.ExportSpans([]OTLPSpan{rootSpan}); err != nil {
-			debugLog("session end update: %v", err)
-		}
+		sendRootSpan(state)
 	}
 	DeleteState(input.SessionID)
 	debugLog("session ended")
@@ -253,31 +177,17 @@ func onCompact() {
 			Transcript: input.TranscriptPath,
 			StartLine:  countLines(input.TranscriptPath),
 			LastFlush:  time.Now().Unix(),
+			Prompt:     "/compact",
 		}
-
-		now := time.Now()
-		rootSpan := OTLPSpan{
-			TraceID:   traceIDFromUUID(traceID),
-			SpanID:    spanIDFromUUID(rootSpanID),
-			Name:      "claude-code",
-			StartTime: now,
-			EndTime:   now,
-			Kind:      SpanKindServer,
-			Attributes: openInferenceAttrs("AGENT", map[string]interface{}{
-				"session.id": input.SessionID,
-				"agent.name": "claude-code",
-			}),
-			Status: SpanStatus{Code: 0},
-		}
-		if err := exporter.ExportSpans([]OTLPSpan{rootSpan}); err != nil {
-			debugLog("compact: create root: %v", err)
-		}
+		// Don't send root span yet, it will be sent on Stop/SessionEnd
 
 		if err := SaveState(state); err != nil {
 			debugLog("save state: %v", err)
 		}
 	} else {
+		// Flush child spans from current trace, then send root span to close it
 		flush(state)
+		sendRootSpan(state)
 	}
 
 	// Create compaction marker trace
@@ -503,59 +413,71 @@ func extractSubagentPrompt(path string) string {
 	return ""
 }
 
-func flush(state *State) {
-	// Update root span with slug and model
-	if !state.SlugSent {
-		allEntries, err := ReadTranscript(state.Transcript, 0)
-		if err == nil && len(allEntries) > 0 {
-			slug := findSlug(allEntries)
-			model := FindModel(allEntries)
-			if slug != "" || model != "" {
-				startTime := parseTimestamp(state.StartTime)
-				now := time.Now()
-				attrs := openInferenceAttrs("AGENT", map[string]interface{}{
-					"session.id": state.SessionID,
-					"agent.name": "claude-code",
-				})
-				name := "claude-code"
-				if slug != "" {
-					name = slug
-				}
-				if model != "" {
-					attrs["llm.model_name"] = model
-				}
+// sendRootSpan builds and sends the complete root AGENT span with input, output, and OK status.
+// Called once at the end of a trace (onStop or onSessionEnd). OTLP spans are immutable.
+func sendRootSpan(state *State) {
+	output := getLastOutput(state)
+	now := time.Now()
+	startTime := parseTimestamp(state.StartTime)
 
-				rootSpan := OTLPSpan{
-					TraceID:    traceIDFromUUID(state.TraceID),
-					SpanID:     spanIDFromUUID(state.RootSpanID),
-					Name:       name,
-					StartTime:  startTime,
-					EndTime:    now,
-					Kind:       SpanKindServer,
-					Attributes: attrs,
-					Status:     SpanStatus{Code: 0},
-				}
-				if err := exporter.ExportSpans([]OTLPSpan{rootSpan}); err != nil {
-					debugLog("update root metadata: %v", err)
-				} else if slug != "" {
-					state.SlugSent = true
-				}
-			}
+	attrs := openInferenceAttrs("AGENT", map[string]interface{}{
+		"input.value":      safeStringify(map[string]string{"prompt": state.Prompt}, maxFieldLen),
+		"input.mime_type":  "application/json",
+		"output.value":     output,
+		"output.mime_type": "text/plain",
+		"session.id":       state.SessionID,
+		"agent.name":       "claude-code",
+	})
+
+	name := "claude-code"
+	allEntries, err := ReadTranscript(state.Transcript, 0)
+	if err == nil {
+		if slug := findSlug(allEntries); slug != "" {
+			name = slug
+		}
+		if model := FindModel(allEntries); model != "" {
+			attrs["llm.model_name"] = model
 		}
 	}
 
+	rootSpan := OTLPSpan{
+		TraceID:   traceIDFromUUID(state.TraceID),
+		SpanID:    spanIDFromUUID(state.RootSpanID),
+		Name:      name,
+		StartTime: startTime,
+		EndTime:   now,
+		Kind:      SpanKindServer,
+		Attributes: attrs,
+		Status:    SpanStatus{Code: 1}, // OK
+	}
+
+	if config.RootSpanID != "" {
+		rootSpan.ParentSpanID = spanIDFromUUID(config.RootSpanID)
+	}
+
+	if err := exporter.ExportSpans([]OTLPSpan{rootSpan}); err != nil {
+		debugLog("send root span: %v", err)
+	}
+}
+
+func flush(state *State) {
+	// Only send child spans (tool calls, thinking, text). Root span is sent by sendRootSpan.
 	entries, err := ReadTranscript(state.Transcript, state.StartLine)
 	if err != nil || len(entries) == 0 {
+		debugLog("flush: no entries from line %d", state.StartLine)
 		return
 	}
+
+	debugLog("flush: read %d transcript entries from line %d", len(entries), state.StartLine)
 
 	emptyParent := [8]byte{}
 	spans := processTranscriptEntries(state.TraceID, entries, spanIDFromUUID(state.RootSpanID), emptyParent)
 	if len(spans) == 0 {
+		debugLog("flush: no spans produced from %d entries", len(entries))
 		return
 	}
 
-	debugLog("flush: %d spans", len(spans))
+	debugLog("flush: sending %d child spans", len(spans))
 	if err := exporter.ExportSpans(spans); err != nil {
 		debugLog("send spans: %v", err)
 	}
