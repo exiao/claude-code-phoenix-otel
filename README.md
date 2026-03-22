@@ -43,13 +43,24 @@ project_name=claude-code
 
 ## Enable Tracing
 
-Tracing is per-project. Enable it with the slash command:
+Configuration alone doesn't start tracing. You must explicitly enable it per-project.
+
+**Option 1: Slash command** (from within Claude Code):
 
 ```
 /phoenix:trace-claude-code start
 ```
 
-Other commands:
+**Option 2: Manual** (from your terminal):
+
+```bash
+mkdir -p .claude
+touch .claude/.phoenix-tracing-enabled
+```
+
+Run this in the project directory where you use Claude Code. Then restart Claude Code.
+
+**Other commands:**
 
 ```
 /phoenix:trace-claude-code start --debug  # Enable + debug logging
@@ -57,7 +68,7 @@ Other commands:
 /phoenix:trace-claude-code status         # Check state
 ```
 
-Changes take effect immediately for new conversation turns.
+For debug mode manually: `echo "debug" > .claude/.phoenix-tracing-enabled`
 
 ## Environment Variables
 
