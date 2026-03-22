@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Vet
+        run: cd src && go vet ./...
+
+      - name: Test
+        run: cd src && go test -v ./...
+
+      - name: Build (linux/amd64)
+        run: cd src && GOOS=linux GOARCH=amd64 go build -o /dev/null .

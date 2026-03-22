@@ -1,0 +1,19 @@
+{
+  "name": "phoenix-otel",
+  "version": "0.1.0",
+  "description": "Export Claude Code session traces to Phoenix (Arize) via OpenTelemetry",
+  "author": {
+    "name": "Eric Xiao",
+    "url": "https://github.com/exiao"
+  },
+  "repository": "https://github.com/exiao/claude-code-phoenix-otel",
+  "license": "Apache-2.0",
+  "keywords": [
+    "phoenix",
+    "arize",
+    "observability",
+    "tracing",
+    "opentelemetry",
+    "openinference"
+  ]
+}
