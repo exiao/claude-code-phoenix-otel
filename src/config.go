@@ -37,13 +37,21 @@ func LoadConfig() (*Config, error) {
 
 	tracing := getTracingState()
 
+	// Auto-enable when PHOENIX_HOST is configured.
+	// The .phoenix-tracing-enabled file can override: if it exists, use it.
+	// If it doesn't exist, default to enabled (config presence = intent to trace).
+	enabled := true
+	if tracing.found {
+		enabled = tracing.enabled
+	}
+
 	cfg := &Config{
 		URL:           strings.TrimSuffix(url, "/"),
 		Project:       "claude-code",
 		APIKey:        getEnvOrConfig("PHOENIX_API_KEY", fileConfig, "api_key"),
 		Debug:         os.Getenv("PHOENIX_CC_DEBUG") == "true" || tracing.debug,
 		Truncate:      os.Getenv("PHOENIX_CC_TRUNCATE_FIELDS") != "false",
-		Enabled:       tracing.enabled,
+		Enabled:       enabled,
 		ParentTraceID: os.Getenv("PHOENIX_CC_PARENT_TRACE_ID"),
 		RootSpanID:    os.Getenv("PHOENIX_CC_ROOT_SPAN_ID"),
 	}
@@ -89,13 +97,19 @@ func getEnvOrConfig(envVar string, fileConfig map[string]string, configKey strin
 type tracingState struct {
 	enabled bool
 	debug   bool
+	found   bool // whether the tracing file was found at all
 }
 
 func checkTracingFile(path string) (tracingState, bool) {
 	if _, err := os.Stat(path); err == nil {
-		state := tracingState{enabled: true}
+		state := tracingState{enabled: true, found: true}
 		if data, err := os.ReadFile(path); err == nil {
-			state.debug = strings.TrimSpace(string(data)) == "debug"
+			content := strings.TrimSpace(string(data))
+			state.debug = content == "debug"
+			// A file containing "false" or "disabled" explicitly disables tracing
+			if content == "false" || content == "disabled" {
+				state.enabled = false
+			}
 		}
 		return state, true
 	}
@@ -108,5 +122,5 @@ func getTracingState() tracingState {
 			return state
 		}
 	}
-	return tracingState{}
+	return tracingState{} // found=false: let config decide
 }

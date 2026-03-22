@@ -160,10 +160,10 @@ func TestTracingStateFromFile(t *testing.T) {
 	claudeDir := filepath.Join(tmpDir, ".claude")
 	os.MkdirAll(claudeDir, 0755)
 
-	// No file = disabled
+	// No file = not found (config decides)
 	state := getTracingState()
-	if state.enabled {
-		t.Error("should be disabled without file")
+	if state.found {
+		t.Error("should not be found without file")
 	}
 
 	// Empty file = enabled
@@ -171,6 +171,9 @@ func TestTracingStateFromFile(t *testing.T) {
 	state = getTracingState()
 	if !state.enabled {
 		t.Error("should be enabled with file")
+	}
+	if !state.found {
+		t.Error("should be found with file")
 	}
 	if state.debug {
 		t.Error("should not be debug with empty file")
@@ -184,6 +187,33 @@ func TestTracingStateFromFile(t *testing.T) {
 	}
 	if !state.debug {
 		t.Error("should be debug")
+	}
+
+	// "disabled" content = explicitly disabled
+	os.WriteFile(filepath.Join(claudeDir, ".phoenix-tracing-enabled"), []byte("disabled"), 0644)
+	state = getTracingState()
+	if state.enabled {
+		t.Error("should be disabled with 'disabled' content")
+	}
+	if !state.found {
+		t.Error("should still be found")
+	}
+}
+
+func TestAutoEnableWithConfig(t *testing.T) {
+	t.Setenv("PHOENIX_HOST", "https://phoenix.example.com")
+	// No tracing file, no CLAUDE_PROJECT_DIR
+	t.Setenv("CLAUDE_PROJECT_DIR", t.TempDir())
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+	if !cfg.Enabled {
+		t.Error("should auto-enable when PHOENIX_HOST is set and no tracing file")
 	}
 }
 
