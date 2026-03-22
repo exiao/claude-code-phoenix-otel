@@ -26,20 +26,30 @@ Then restart Claude Code for hooks to take effect.
 
 ## Configure
 
-Set your Phoenix endpoint and API key:
+**Option 1: Slash command** (recommended, from within Claude Code):
 
-```bash
-export PHOENIX_HOST="https://app.phoenix.arize.com/s/your-space"
-export PHOENIX_API_KEY="your-phoenix-api-key"
+```
+/phoenix:configure https://app.phoenix.arize.com/s/your-space your-api-key
 ```
 
-Or create `~/.phoenix.config`:
+This creates `~/.phoenix.config` which the plugin reads automatically. No environment variables needed.
+
+**Option 2: Config file** (manually create `~/.phoenix.config`):
 
 ```
 host=https://app.phoenix.arize.com/s/your-space
 api_key=your-phoenix-api-key
 project_name=claude-code
 ```
+
+**Option 3: Environment variables:**
+
+```bash
+export PHOENIX_HOST="https://app.phoenix.arize.com/s/your-space"
+export PHOENIX_API_KEY="your-phoenix-api-key"
+```
+
+Note: env vars must be in the shell that launches Claude Code, or set in `~/.claude/settings.json` under `"env"`. The config file approach avoids this issue entirely.
 
 ## Enable Tracing
 
