@@ -35,8 +35,8 @@ project_name=claude-code
 ## Examples
 
 ```
-/phoenix:configure https://app.phoenix.arize.com/s/myspace sk-abc123
-/phoenix:configure
+/phoenix-otel:configure https://app.phoenix.arize.com/s/myspace sk-abc123
+/phoenix-otel:configure
 ```
 
 ## Notes

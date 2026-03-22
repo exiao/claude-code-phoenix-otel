@@ -29,7 +29,7 @@ Then restart Claude Code for hooks to take effect.
 **Option 1: Slash command** (recommended, from within Claude Code):
 
 ```
-/phoenix:configure https://app.phoenix.arize.com/s/your-space your-api-key
+/phoenix-otel:configure https://app.phoenix.arize.com/s/your-space your-api-key
 ```
 
 This creates `~/.phoenix.config` which the plugin reads automatically. No environment variables needed.
@@ -58,7 +58,7 @@ Configuration alone doesn't start tracing. You must explicitly enable it per-pro
 **Option 1: Slash command** (from within Claude Code):
 
 ```
-/phoenix:trace-claude-code start
+/phoenix-otel:trace-claude-code start
 ```
 
 **Option 2: Manual** (from your terminal):
@@ -73,9 +73,9 @@ Run this in the project directory where you use Claude Code. Then restart Claude
 **Other commands:**
 
 ```
-/phoenix:trace-claude-code start --debug  # Enable + debug logging
-/phoenix:trace-claude-code stop           # Disable
-/phoenix:trace-claude-code status         # Check state
+/phoenix-otel:trace-claude-code start --debug  # Enable + debug logging
+/phoenix-otel:trace-claude-code stop           # Disable
+/phoenix-otel:trace-claude-code status         # Check state
 ```
 
 For debug mode manually: `echo "debug" > .claude/.phoenix-tracing-enabled`
